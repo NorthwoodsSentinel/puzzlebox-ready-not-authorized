@@ -1,0 +1,16 @@
+.keys/
+protected/
+*.jsonl
+puzzle-state.json
+used-nonces.jsonl
+vendor/**/node_modules/
+node_modules/
+evidence/
+
+# also exclude the original run key names
+.authd-key
+.invocation-key
+.permit-key
+.workflow-key
+*-key
+.log-*

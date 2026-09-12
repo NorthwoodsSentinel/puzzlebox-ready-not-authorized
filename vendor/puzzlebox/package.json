@@ -1,0 +1,1 @@
+{ "name": "puzzlebox-vendored-scratch", "private": true, "type": "module", "dependencies": { "zod": "^3.23.8" } }
