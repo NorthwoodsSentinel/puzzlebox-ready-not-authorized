@@ -3,8 +3,8 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$DIR/.keys"
-for k in cap inv wf permit; do
+for k in cap inv wf permit state; do
   [ -f "$DIR/.keys/$k.key" ] || head -c 32 /dev/urandom | base64 > "$DIR/.keys/$k.key"
   chmod 600 "$DIR/.keys/$k.key"
 done
-echo "keys ready in $DIR/.keys (cap, inv, wf, permit)"
+echo "keys ready in $DIR/.keys (cap, inv, wf, permit, state)"

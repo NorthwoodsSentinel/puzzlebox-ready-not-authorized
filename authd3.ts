@@ -32,9 +32,20 @@ const TOCTOU_DELAY_MS = Number(process.env.TOCTOU_DELAY_MS || 0);
 const TOCTOU_NAIVE = process.env.TOCTOU_NAIVE === '1'; // if set, SKIP the USE-time recheck (shows the race exists)
 async function liveEpoch(): Promise<number> { try { const j = await (await fetch('http://127.0.0.1:8788/state')).json(); return Number(j?.epoch); } catch { return NaN; } }
 
+// Fails CLOSED (issue #1): one malformed line used to make the whole check return false, silently
+// disabling replay protection for every nonce. An unreadable ledger now counts as "used".
+const NONCE_FAIL_OPEN = process.env.NONCE_FAIL_OPEN === '1'; // vulnerable specimen
 function nonceUsed(n: string): boolean {
   if (!n || !existsSync(NONCES)) return false;
-  try { return readFileSync(NONCES, 'utf8').split('\n').some(l => l && JSON.parse(l).nonce === n); } catch { return false; }
+  if (NONCE_FAIL_OPEN) { try { return readFileSync(NONCES, 'utf8').split('\n').some(l => l && JSON.parse(l).nonce === n); } catch { return false; } }
+  try {
+    for (const l of readFileSync(NONCES, 'utf8').split('\n')) {
+      if (!l) continue;
+      let j: any; try { j = JSON.parse(l); } catch { return true; }
+      if (j?.nonce === n) return true;
+    }
+    return false;
+  } catch { return true; }
 }
 function markerPresent(id: string, resource: string): boolean {
   const f = PROTECTED.has(resource) ? resource : `${PROT}/deployments.log`;
@@ -42,10 +53,10 @@ function markerPresent(id: string, resource: string): boolean {
 }
 
 /** Returns the decision plus a per-warrant status map. No warrant is consulted for another's job. */
-async function decide(body: any): Promise<{ decision: 'ALLOW' | 'DENY'; reason: string; wf: string; inv: string; cap: string; usedNonces: string[]; epochIssued: number|null; epochAtDecision: number|null }> {
+async function decide(body: any): Promise<{ decision: 'ALLOW' | 'DENY'; reason: string; wf: string; inv: string; cap: string; usedNonces: string[]; epochIssued: number|null; epochAtDecision: number|null; requiredState: string|null }> {
   const need = { cap: true, wf: MODE === 'cap+wf' || MODE === 'all', inv: MODE === 'cap+inv' || MODE === 'all' };
   let wfStatus = 'not-required', invStatus = 'not-required', capStatus = 'not-checked';
-  const nonces: string[] = []; let epochIssued: number|null = null, epochAtDecision: number|null = null;
+  const nonces: string[] = []; let epochIssued: number|null = null, epochAtDecision: number|null = null, requiredState: string|null = null;
 
   // CAPABILITY (may this principal perform this action on this resource?)
   const capTok = String(body?.capability ?? '');
@@ -69,6 +80,7 @@ async function decide(body: any): Promise<{ decision: 'ALLOW' | 'DENY'; reason: 
     if (w.action !== body?.action) return fail('wf', `wf action ${w.action} != request`);
     if (nonceUsed(w.nonce)) return fail('wf', `wf nonce ${w.nonce} replay`);
     epochIssued = typeof w.epoch === 'number' ? w.epoch : null;
+    requiredState = typeof w.required_state === 'string' ? w.required_state : null; // carried into the permit (issue #1)
     if (WF_FRESHNESS === 'continuous') {
       epochAtDecision = await liveEpoch();
       if (TOCTOU_DELAY_MS > 0) { await new Promise(r => setTimeout(r, TOCTOU_DELAY_MS)); } // open the check->use window (rung 11)
@@ -92,11 +104,11 @@ async function decide(body: any): Promise<{ decision: 'ALLOW' | 'DENY'; reason: 
     invStatus = `valid(${iw.caller})`; nonces.push(iw.nonce);
   }
 
-  return { decision: 'ALLOW', reason: `all required warrants valid (mode=${MODE}${WF_FRESHNESS==='continuous'?'/continuous':''})`, wf: wfStatus, inv: invStatus, cap: capStatus, usedNonces: nonces, epochIssued, epochAtDecision };
+  return { decision: 'ALLOW', reason: `all required warrants valid (mode=${MODE}${WF_FRESHNESS==='continuous'?'/continuous':''})`, wf: wfStatus, inv: invStatus, cap: capStatus, usedNonces: nonces, epochIssued, epochAtDecision, requiredState };
 
   function fail(plane: string, why: string) {
     if (plane === 'cap') capStatus = `INVALID: ${why}`; else if (plane === 'wf') wfStatus = `INVALID: ${why}`; else invStatus = `INVALID: ${why}`;
-    return { decision: 'DENY' as const, reason: `${plane}: ${why}`, wf: wfStatus, inv: invStatus, cap: capStatus, usedNonces: [], epochIssued, epochAtDecision };
+    return { decision: 'DENY' as const, reason: `${plane}: ${why}`, wf: wfStatus, inv: invStatus, cap: capStatus, usedNonces: [], epochIssued, epochAtDecision, requiredState };
   }
 }
 
@@ -114,7 +126,7 @@ Bun.serve({
     let permit = '';
     if (d.decision === 'ALLOW' && EMIT_PERMIT) {
       // Do NOT perform the effect. Emit a narrowly-scoped execution permit; the effector races the epoch atomically.
-      permit = mint('permit', { puzzle_id: body?.puzzle_id, expected_epoch: d.epochIssued, principal: body?.principal, caller: body?.caller ?? null, action: body?.action, resource: body?.resource, attempt_id: attemptId, expires: new Date(Date.now() + 5000).toISOString() });
+      permit = mint('permit', { puzzle_id: body?.puzzle_id, expected_epoch: d.epochIssued, required_state: d.requiredState, issued_at: new Date().toISOString(), principal: body?.principal, caller: body?.caller ?? null, action: body?.action, resource: body?.resource, attempt_id: attemptId, expires: new Date(Date.now() + 5000).toISOString() });
       for (const n of d.usedNonces) appendFileSync(NONCES, JSON.stringify({ nonce: n, ts: new Date().toISOString() }) + '\n');
     } else if (d.decision === 'ALLOW') {
       if (WF_FRESHNESS === 'continuous' && !TOCTOU_NAIVE) { const eNow = await liveEpoch(); if (eNow !== d.epochIssued) { d.decision = 'DENY'; d.reason = `stale at USE: epoch moved ${d.epochIssued} -> ${eNow} between check and effect`; } }
