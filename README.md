@@ -50,6 +50,26 @@ Everything runs as you, on loopback ports 8788 / 8789 / 8790. Keys are generated
 
 Each broken specimen is isolated behind an env flag (`TOCTOU_NAIVE=1`, `PERMIT_SINGLE_USE=0`) or a weaker monitor mode, so "this is the broken specimen" is always distinguishable from "this is the current fixture."
 
+## Three more, found by Cliff Hall ([issue #1](https://github.com/NorthwoodsSentinel/puzzlebox-ready-not-authorized/issues/1))
+
+The first "break it" reply broke it. With only legitimately minted warrants and no key compromise, a deploy
+fired while the live workflow was in **WORKING**.
+
+5. **State rollback.** `pbxd` restored `state` and `epoch` from its state file as two independent fields, and
+   that file is writable by the invoking user. Forging `{WORKING, epoch 1}` after a legitimate READY warrant
+   made the epoch check pass. The epoch was standing in for "is the work ready?", and a proxy that can come
+   apart from what it stands for is not a check. Both of Cliff's fixes are applied, and either one alone stops it:
+   **seal `{state, epoch}` together** with a dedicated `state` key, refusing an unsealed file; and **carry
+   `required_state` into the permit and compare it with the live state name** inside the effector's no-await
+   critical section. Flags: `STATE_UNSIGNED=1`, `EFFECT_STATE_CHECK=0`.
+6. **Permit replay across a restart.** Single-use lived in memory and was cleared on restart. The effector
+   now refuses any permit issued before it started. Flag: `PERMIT_BOOT_CHECK=0`.
+7. **Nonce ledger failed open.** One malformed line made every nonce recorded after it look unused. An
+   unreadable ledger now counts as "used". A corrupt ledger blocks everything, which is the intended failure. Flag: `NONCE_FAIL_OPEN=1`.
+
+`run.sh` replays Cliff's exact sequence (tests 6a–6d), plus 7 and 8: `RESULT: 17 passed, 0 failed`.
+`setsid` is now optional, so the suite runs on macOS (also reported by Cliff).
+
 ## Run it
 
 ```
@@ -57,11 +77,11 @@ bun --version   # needs bun
 ./run.sh        # generates keys, installs zod for the vendored Puzzle, runs the whole story
 ```
 
-`run.sh` prints EXPECTED / OBSERVED / EFFECT SEEN? / PASS per test and ends with `RESULT: 9 passed, 0 failed`. It is idempotent, manages only its own processes, and fails loudly on a port conflict.
+`run.sh` prints EXPECTED / OBSERVED / EFFECT SEEN? / PASS per test and ends with `RESULT: 17 passed, 0 failed`. It is idempotent, manages only its own processes, and fails loudly on a port conflict.
 
 ## Scoped claim (only what the receipts earn)
 
-Within this local fixture, **no protected effect occurred unless**: the work was in the required workflow state at the atomic effect boundary; the principal held the required capability; the caller held an authorized single-use invocation warrant; and the execution permit was valid and single-use.
+Within this local fixture, **no protected effect occurred unless**: the work was in the required workflow state at the atomic effect boundary, compared by name and not only by epoch; the principal held the required capability; the caller held an authorized single-use invocation warrant; and the execution permit was valid and single-use.
 
 ## What is NOT proven
 

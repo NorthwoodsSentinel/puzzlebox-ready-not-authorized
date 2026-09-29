@@ -9,10 +9,14 @@ const KEYS: Record<string,string> = {
   inv: readFileSync(`${K}/inv.key`,'utf8').trim(),
   wf:  readFileSync(`${K}/wf.key`,'utf8').trim(),
   permit: readFileSync(`${K}/permit.key`,'utf8').trim(),
+  state: readFileSync(`${K}/state.key`,'utf8').trim(), // seals pbxd's persisted {state,epoch} pair (issue #1)
 };
 const b64u = (s:string)=>Buffer.from(s).toString('base64url');
 const unb64u = (s:string)=>Buffer.from(s.replace(/-/g,'+').replace(/_/g,'/'),'base64').toString('utf8');
 export function mint(typ:'cap'|'inv'|'wf'|'permit', claims:object):string { const p=b64u(JSON.stringify({...claims,typ})); return `${p}.${createHmac('sha256',KEYS[typ]).update(p).digest('base64url')}`; }
+// seal/sealOk: bare HMAC over a payload string with the dedicated `state` key. Not a warrant: no typ, no expiry.
+export function seal(payload:string):string { return createHmac('sha256',KEYS.state).update(payload).digest('base64url'); }
+export function sealOk(payload:string, sig:string):boolean { const a=Buffer.from(String(sig)),b=Buffer.from(seal(payload)); return a.length===b.length&&timingSafeEqual(a,b); }
 export function verify(typ:'cap'|'inv'|'wf'|'permit', tok:string):{ok:boolean;why:string;claims:any}{
   if(typeof tok!=='string'||!tok) return {ok:false,why:`no ${typ} warrant`,claims:null};
   const parts=tok.split('.'); if(parts.length!==2) return {ok:false,why:`malformed ${typ} warrant`,claims:null};

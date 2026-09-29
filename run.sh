@@ -20,7 +20,8 @@ for pt in $PB $MON $DEP; do portfree $pt; done
 # --- fresh state (idempotent) ---
 mkdir -p "$PROTECTED_DIR"; : > "$R1"; : > "$R2"; rm -f "$DIR/puzzle-state.json" "$DIR/used-nonces.jsonl" "$DIR/receipts.jsonl"
 
-start(){ setsid bash -c "$2" >"$DIR/.log-$1" 2>&1 < /dev/null & PIDS+=($!); disown; }
+SETSID=$(command -v setsid || true)   # Linux has setsid; macOS does not (reported by Cliff Hall, issue #1)
+start(){ $SETSID bash -c "$2" >"$DIR/.log-$1" 2>&1 < /dev/null & PIDS+=($!); disown; }
 freshpuzzle(){ rm -f "$DIR/puzzle-state.json"; }
 waitup(){ for i in $(seq 1 40); do curl -s -m1 "http://127.0.0.1:$1$2" >/dev/null 2>&1 && return 0; sleep 0.1; done; die "service on $1 did not come up"; }
 stopall(){ cleanup; PIDS=(); sleep 0.4; }
@@ -150,6 +151,95 @@ curl -s -m5 -X POST http://127.0.0.1:$PB/effect -H 'content-type: application/js
 R2ND=$(curl -s -m5 -X POST http://127.0.0.1:$PB/effect -H 'content-type: application/json' -d "{\"permit\":\"$PERMIT\"}")
 DEC=$(echo "$R2ND" | grep -oE '"decision": *"[A-Z]*"' | cut -d'"' -f4); E=$(marker replay-fixed "$R1"); V=$([ "$E" -eq 1 ] && echo "once" || echo "$E")
 report "first ALLOW, second DENY (marker count 1)" "2nd_decision=$DEC marker=$E" "$V" "$V" "once"
+stopall
+
+# ---------- 6. STATE ROLLBACK (issue #1, found by Cliff Hall) ----------
+# Drive to READY, mint a LEGITIMATE warrant, stop pbxd, forge {WORKING, epoch 1} into the state file, restart,
+# redeem. No signing key is touched. Fix 1 seals {state,epoch} together; Fix 2 re-checks the live state name
+# in the effector's critical section. Either one alone stops it.
+pbstart(){ start pbxd "$1"; PBPID=${PIDS[${#PIDS[@]}-1]}; waitup $PB /state; }
+pbstop(){ kill -9 "$PBPID" 2>/dev/null; for i in $(seq 1 40); do curl -s -m1 http://127.0.0.1:$PB/state >/dev/null 2>&1 || return 0; sleep 0.1; done; die "pbxd did not stop"; }
+forge(){ printf '{"puzzle_id":"%s","state":"WORKING","epoch":1}\n' "$P" > "$DIR/puzzle-state.json"; }
+live(){ snap | grep -o '"currentState": "[A-Z]*"' | cut -d'"' -f4; }
+rollback(){ # $1 pbxd env, $2 attempt id -> sets DEC (monitor), EDEC (effector), LIVE
+  freshpuzzle; pbstart "$1 bun pbxd.ts"
+  start mon "AUTHD_MODE=cap+wf WF_FRESHNESS=continuous EMIT_PERMIT=1 bun authd3.ts"; waitup $MON /health
+  advance finish_work; WF=$(wf "$R1" "wf-$2"); C=$(cap pbagent "$R1" "c-$2")
+  pbstop; forge; pbstart "$1 bun pbxd.ts"; LIVE="$(live)@$(ep)"
+  PMT=$(curl -s -m6 -X POST http://127.0.0.1:$MON/act -H 'content-type: application/json' \
+    -d "{\"principal\":\"pbagent\",\"action\":\"deploy-marker\",\"resource\":\"$R1\",\"attempt_id\":\"$2\",\"capability\":\"$C\",\"puzzle_id\":\"$P\",\"workflow_warrant\":\"$WF\"}")
+  DEC=$(echo "$PMT" | grep -oE '"decision": *"[A-Z]*"' | cut -d'"' -f4)
+  PERMIT=$(echo "$PMT" | grep -oE '"permit":"[^"]*"' | cut -d'"' -f4); EDEC="(no permit)"
+  if [ -n "$PERMIT" ]; then EDEC=$(curl -s -m5 -X POST http://127.0.0.1:$PB/effect -H 'content-type: application/json' -d "{\"permit\":\"$PERMIT\"}" | grep -oE '"reason": *"[^"]*"' | cut -d'"' -f4); fi
+}
+echo "### 6. STATE ROLLBACK — forged {WORKING, epoch 1} after a legitimate READY warrant (issue #1)"
+echo "  6a BROKEN SPECIMEN (unsealed state file accepted, effector trusts epoch alone):"
+rollback "STATE_UNSIGNED=1 EFFECT_STATE_CHECK=0" rollback-broken
+E=$(marker rollback-broken "$R1"); V=$([ "$E" -ge 1 ] && echo yes || echo no)
+report "deploy fires while live state is WORKING (the vulnerability)" "live=$LIVE monitor=$DEC marker=$E" "$V" "$V" "yes"
+stopall
+echo "  6b CURRENT FIXTURE (sealed state file + effector state check):"
+rollback "" rollback-fixed
+E=$(marker rollback-fixed "$R1"); V=$([ "$E" -ge 1 ] && echo yes || echo no)
+report "pbxd refuses forged file (WORKING@0), monitor DENY, no effect" "live=$LIVE monitor=$DEC marker=$E" "$V" "$V" "no"
+stopall
+echo "  6c DEFENSE IN DEPTH (forged file ACCEPTED; only the effector's state check stands):"
+rollback "STATE_UNSIGNED=1" rollback-depth
+E=$(marker rollback-depth "$R1"); V=$([ "$E" -ge 1 ] && echo yes || echo no)
+report "monitor ALLOWs on epoch, effector DENYs on live state" "live=$LIVE monitor=$DEC effector='$EDEC' marker=$E" "$V" "$V" "no"
+stopall
+echo "  6d CURRENT FIXTURE: a legitimately sealed state still survives restart:"
+freshpuzzle; pbstart "bun pbxd.ts"; advance finish_work; pbstop; pbstart "bun pbxd.ts"
+S="$(live)@$(ep)"
+report "READY@1 restored after restart" "live=$S" "n/a" "$S" "READY@1"
+stopall
+
+# ---------- 7. PERMIT REPLAY ACROSS RESTART (issue #1, second observation) ----------
+replayrestart(){ # $1 pbxd env, $2 attempt id -> sets DEC2
+  freshpuzzle; pbstart "$1 bun pbxd.ts"
+  start mon "AUTHD_MODE=cap+wf WF_FRESHNESS=continuous EMIT_PERMIT=1 bun authd3.ts"; waitup $MON /health
+  advance finish_work; WF=$(wf "$R1" "wf-$2"); C=$(cap pbagent "$R1" "c-$2")
+  PMT=$(curl -s -m6 -X POST http://127.0.0.1:$MON/act -H 'content-type: application/json' \
+    -d "{\"principal\":\"pbagent\",\"action\":\"deploy-marker\",\"resource\":\"$R1\",\"attempt_id\":\"$2\",\"capability\":\"$C\",\"puzzle_id\":\"$P\",\"workflow_warrant\":\"$WF\"}")
+  PERMIT=$(echo "$PMT" | grep -oE '"permit":"[^"]*"' | cut -d'"' -f4)
+  curl -s -m5 -X POST http://127.0.0.1:$PB/effect -H 'content-type: application/json' -d "{\"permit\":\"$PERMIT\"}" >/dev/null
+  pbstop; pbstart "$1 bun pbxd.ts"   # single-use memory is gone; sealed READY@1 is restored
+  DEC2=$(curl -s -m5 -X POST http://127.0.0.1:$PB/effect -H 'content-type: application/json' -d "{\"permit\":\"$PERMIT\"}" | grep -oE '"decision": *"[A-Z]*"' | cut -d'"' -f4)
+}
+echo "### 7. PERMIT REPLAY ACROSS AN EFFECTOR RESTART (single-use set is in-memory)"
+echo "  7a BROKEN SPECIMEN (effector honors permits minted before it started):"
+replayrestart "PERMIT_BOOT_CHECK=0" rr-broken
+E=$(marker rr-broken "$R1"); V=$([ "$E" -ge 2 ] && echo "twice" || echo "once")
+report "same permit fires again after restart (the vulnerability)" "2nd_decision=$DEC2 marker=$E" "$V" "$V" "twice"
+stopall
+echo "  7b CURRENT FIXTURE (permits issued before effector boot are refused):"
+replayrestart "" rr-fixed
+E=$(marker rr-fixed "$R1"); V=$([ "$E" -ge 2 ] && echo "twice" || echo "once")
+report "first ALLOW, post-restart DENY (marker count 1)" "2nd_decision=$DEC2 marker=$E" "$V" "$V" "once"
+stopall
+
+# ---------- 8. NONCE LEDGER FAILS OPEN (issue #1, first observation) ----------
+noncecorrupt(){ # $1 monitor env, $2 attempt prefix -> sets DEC2
+  freshpuzzle; rm -f "$DIR/used-nonces.jsonl"; pbstart "bun pbxd.ts"
+  start mon "AUTHD_MODE=cap+wf WF_FRESHNESS=point-in-time $1 bun authd3.ts"; waitup $MON /health
+  advance finish_work; WF=$(wf "$R1" "wf-$2"); C=$(cap pbagent "$R1" "c-$2")
+  echo 'not-json' > "$DIR/used-nonces.jsonl"   # one malformed line AHEAD of every nonce recorded after it
+  for n in 1 2; do
+    RESP=$(curl -s -m6 -X POST http://127.0.0.1:$MON/act -H 'content-type: application/json' \
+      -d "{\"principal\":\"pbagent\",\"action\":\"deploy-marker\",\"resource\":\"$R1\",\"attempt_id\":\"$2-$n\",\"capability\":\"$C\",\"puzzle_id\":\"$P\",\"workflow_warrant\":\"$WF\"}")
+  done
+  DEC2=$(echo "$RESP" | grep -oE '"decision": *"[A-Z]*"' | cut -d'"' -f4)
+}
+echo "### 8. NONCE LEDGER — one malformed line, then the same workflow warrant replayed"
+echo "  8a BROKEN SPECIMEN (parse error => 'nonce unused'):"
+noncecorrupt "NONCE_FAIL_OPEN=1" nr-broken
+E=$(marker nr-broken-2 "$R1"); V=$([ "$E" -ge 1 ] && echo yes || echo no)
+report "replayed warrant ALLOWed (the vulnerability)" "2nd_decision=$DEC2 marker=$E" "$V" "$V" "yes"
+stopall
+echo "  8b CURRENT FIXTURE (unreadable ledger fails CLOSED):"
+noncecorrupt "" nr-fixed
+E=$(marker nr-fixed-2 "$R1"); V=$([ "$E" -ge 1 ] && echo yes || echo no)
+report "replay DENY, no second effect (a corrupt ledger now blocks all, by design)" "2nd_decision=$DEC2 marker=$E" "$V" "$V" "no"
 stopall
 
 echo "=================================================================="

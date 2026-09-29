@@ -12,7 +12,7 @@
  */
 import { Puzzle } from './vendor/puzzlebox/src/stores/Puzzle.ts';
 import { readFileSync, writeFileSync, appendFileSync } from 'fs';
-import { verify } from './warrants.ts';
+import { verify, seal, sealOk } from './warrants.ts';
 
 const PORT = 8788;
 const BASE = process.env.INQ_DIR || import.meta.dir;
@@ -35,15 +35,25 @@ const CONFIG = {
 let epoch = 0; // monotonic, bumped on every successful transition
 const usedPermits = new Set<string>(); // effector-side single-use of execution permits
 const PERMIT_SINGLE_USE = process.env.PERMIT_SINGLE_USE !== '0'; // default ON; vulnerable specimen sets 0
+// Issue #1 (Cliff Hall): the persisted state file is writable by the invoking user, and state and epoch
+// were restored as two independent fields, so {WORKING, epoch 1} could be forged and "fresh" meant nothing.
+const STATE_UNSIGNED = process.env.STATE_UNSIGNED === '1';          // vulnerable specimen: accept an unsealed state file
+const EFFECT_STATE_CHECK = process.env.EFFECT_STATE_CHECK !== '0';  // vulnerable specimen sets 0: effector trusts epoch alone
+const PERMIT_BOOT_CHECK = process.env.PERMIT_BOOT_CHECK !== '0';    // vulnerable specimen sets 0: pre-restart permits replay
+const BOOT_MS = Date.now(); // usedPermits is in-memory, so no permit minted before this process started can be honored
 const puzzle = new Puzzle(PUZZLE_ID, CONFIG);
-// restore persisted state across restarts (root-owned file)
+const statePayload = (st: string, ep: number) => `${PUZZLE_ID}|${st}|${ep}`; // state and epoch sealed TOGETHER
+// restore persisted state across restarts, only if the {state,epoch} pair carries pbxd's own seal
 try {
   const prior = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
-  if (prior?.state) { const s = puzzle.getState(prior.state); if (s) (puzzle as any).currentState = prior.state; if (typeof prior.epoch === 'number') epoch = prior.epoch; }
+  const sealed = typeof prior?.state === 'string' && typeof prior?.epoch === 'number' && sealOk(statePayload(prior.state, prior.epoch), prior?.sig ?? '');
+  if (!sealed && !STATE_UNSIGNED) console.error(`pbxd: refusing ${STATE_FILE} (seal missing or invalid); starting fresh`);
+  else if (prior?.state) { const s = puzzle.getState(prior.state); if (s) (puzzle as any).currentState = prior.state; if (typeof prior.epoch === 'number') epoch = prior.epoch; }
 } catch { /* first boot */ }
 
 function persist() {
-  try { writeFileSync(STATE_FILE, JSON.stringify({ puzzle_id: PUZZLE_ID, state: puzzle.getCurrentState()?.name, epoch, ts: new Date().toISOString() }, null, 1)); } catch { }
+  const st = String(puzzle.getCurrentState()?.name);
+  try { writeFileSync(STATE_FILE, JSON.stringify({ puzzle_id: PUZZLE_ID, state: st, epoch, ts: new Date().toISOString(), sig: seal(statePayload(st, epoch)) }, null, 1)); } catch { }
 }
 function snapshot() {
   const cur = puzzle.getCurrentState();
@@ -79,13 +89,16 @@ Bun.serve({
       const c = v.claims;
       // ----- CRITICAL SECTION (no await): compare epoch, then act -----
       const liveEpoch = epoch;
+      const liveState = puzzle.getCurrentState()?.name ?? null; // synchronous: pbxd owns the Puzzle in-process
       let effect = false, decision = 'DENY', reason = '';
       if (PERMIT_SINGLE_USE && usedPermits.has(String(c.attempt_id))) { reason = `effector: permit ${c.attempt_id} already consumed (replay)`; }
+      else if (PERMIT_BOOT_CHECK && !(Date.parse(String(c.issued_at)) >= BOOT_MS)) { reason = `effector: permit issued before this effector started; single-use cannot be proven across a restart`; }
       else if (c.expected_epoch !== liveEpoch) { reason = `effector stale: permit epoch ${c.expected_epoch} != live epoch ${liveEpoch}`; }
+      else if (EFFECT_STATE_CHECK && c.required_state != null && liveState !== c.required_state) { reason = `effector: live state ${liveState} != required ${c.required_state}`; }
       else if (!R.has(String(c.resource))) { reason = `effector: resource not protected`; }
       else { usedPermits.add(String(c.attempt_id)); appendFileSync(String(c.resource), `DEPLOYED:${c.attempt_id}\n`); decision = 'ALLOW'; reason = 'effector: permit valid, epoch fresh, single-use in critical section'; effect = true; }
       // ----- END CRITICAL SECTION -----
-      rcpt({ attempt_id: c.attempt_id, puzzle_id: c.puzzle_id, expected_epoch: c.expected_epoch, live_epoch: liveEpoch, principal: c.principal, caller: c.caller, requested_resource: c.resource, authorization_decision: decision, reason, side_effect_observed: effect, mode: 'permit-effector' });
+      rcpt({ attempt_id: c.attempt_id, puzzle_id: c.puzzle_id, expected_epoch: c.expected_epoch, live_epoch: liveEpoch, required_state: c.required_state ?? null, live_state: liveState, principal: c.principal, caller: c.caller, requested_resource: c.resource, authorization_decision: decision, reason, side_effect_observed: effect, mode: 'permit-effector' });
       return J({ decision, reason, side_effect_observed: effect }, decision === 'ALLOW' ? 200 : 403);
     }
     return J({ error: 'not found', hint: 'GET /snapshot, POST /action {actionName}, POST /effect {permit}' }, 404);
