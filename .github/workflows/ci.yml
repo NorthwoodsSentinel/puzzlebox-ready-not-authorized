@@ -1,0 +1,35 @@
+# CI: the same checks `bun run local:gate` runs, as separate steps so a failure names its stage: format check,
+# lint (zero warnings), typecheck, and tests with the 90% per-file coverage bar plus the gate-scope check.
+# The end-to-end fixture story (run.sh) stays in test.yml, unchanged; local:gate runs it too.
+#
+# This workflow NEVER deploys and holds no secret. There is nothing to deploy: the fixture runs on loopback only.
+# Actions are pinned to full commit SHAs (the same pins as test.yml): a tag can be moved, a SHA cannot.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least privilege for GITHUB_TOKEN: nothing here writes to the repo.
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    # Hung-job guard, not a flake remedy.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          # Pinned exactly; the version the gate was measured with.
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run format:check
+      - run: bun run lint
+      - run: bun run typecheck
+      - run: bun run test
