@@ -191,7 +191,8 @@ Bun.serve({
     if (url.pathname === "/health") return J({ ok: true, service: "authd3", mode: MODE });
     if (url.pathname !== "/act" || req.method !== "POST")
       return J({ decision: "DENY", reason: `unknown route ${url.pathname}` }, 404);
-    let body: Claims;
+    // eslint-disable-next-line no-useless-assignment -- kept from the original: refactors here must not change emitted JS
+    let body: Claims = {};
     try {
       body = (await req.json()) as Claims;
     } catch {

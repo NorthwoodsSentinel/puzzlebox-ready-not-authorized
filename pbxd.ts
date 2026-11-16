@@ -157,7 +157,8 @@ Bun.serve({
       const liveState = puzzle.getCurrentState()?.name ?? null; // synchronous: pbxd owns the Puzzle in-process
       let effect = false,
         decision = "DENY",
-        reason: string;
+        // eslint-disable-next-line no-useless-assignment -- kept from the original: refactors here must not change emitted JS
+        reason = "";
       if (PERMIT_SINGLE_USE && usedPermits.has(String(c.attempt_id))) {
         reason = `effector: permit ${c.attempt_id} already consumed (replay)`;
       } else if (PERMIT_BOOT_CHECK && !(Date.parse(String(c.issued_at)) >= BOOT_MS)) {

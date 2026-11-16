@@ -23,7 +23,8 @@ This repo is a security fixture. Its code is the experiment, so a behavior chang
 - **No behavior change without an issue that says so.** A refactor, a lint fix, a type fix or a review suggestion
   is never a reason to change what a check does. Type-only edits (annotations, `as` casts) are allowed when the
   emitted JavaScript stays the same; check by comparing `bun build --no-bundle --minify-syntax` output before and
-  after.
+  after. (That is why `authd3.ts` `let body = {}` and `pbxd.ts` `reason = ""` keep their dead initializers
+  under a justified one-line `no-useless-assignment` waiver: removing them would change the emitted code.)
 - **Never weaken a check**: warrant verification, typ/key binding, expiry, nonce single-use, the fail-closed nonce
   ledger, the epoch and state checks, the boot check, the protected-resource set, or the no-await critical section
   in `pbxd.ts` `/effect`.
