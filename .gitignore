@@ -14,3 +14,7 @@ evidence/
 .workflow-key
 *-key
 .log-*
+
+# Gate tooling output and agent scratch space (never committed).
+coverage/
+.scratch/

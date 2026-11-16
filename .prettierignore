@@ -1,0 +1,14 @@
+# Installs and generated output are never a gate target (AGENTS.md).
+node_modules/
+coverage/
+bun.lock
+.scratch/
+# Cliff Hall's PuzzleBox, vendored byte-identical to upstream (its sha256 is cited in README.md). Never reformat it.
+vendor/
+# Runtime output of run.sh (also git-ignored).
+.keys/
+protected/
+*.jsonl
+puzzle-state.json
+# Prose is out of the format scope: prettier rewrites Markdown (list markers, escapes).
+*.md
