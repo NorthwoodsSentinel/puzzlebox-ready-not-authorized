@@ -101,7 +101,7 @@ GitHub issues are the board for this public repo.
 - **Every fixture script at the repo root must clear ≥ 90 on all four dimensions (lines, statements, functions,
   branches), per file**, enforced by `vitest.config.ts` and therefore by `bun run test`, `bun run local:gate` and
   CI. This is the source's bar (Cliff's inspector). **Never lower the threshold to pass.**
-- Measured on 2026-11-16 (statements / branches / functions / lines): `authd3.ts` 99.32 / 98.56 / 100 / 99.19,
+- Measured on 2026-11-16 (statements / branches / functions / lines): `authd3.ts` 99.33 / 98.56 / 100 / 99.2,
   `pbxd.ts` 100 / 95.77 / 100 / 100, `warrants.ts`, `deputy2.ts`, `issue-cap3.ts`, `issue-invocation.ts`,
   `issue-workflow.ts`, `verify-effect.ts` 100 / 100 / 100 / 100. No coverage exclusions.
 - Coverage exclusions, if one is ever needed, are exact paths, one per entry, each with a reason and a follow-up
